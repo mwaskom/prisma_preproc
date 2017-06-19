@@ -11,10 +11,14 @@ data_dir = os.environ["SUBJECTS_DIR"]
 
 # --- Parameter specification
 
-# Session info should be a nested dictionary
-# The outer keys should be subject ids, they should map to dicts with
-# keys as session ids and values as the number of runs in that session
-# We will continue to think about the best spec here, this is the most basic
+# TODO there are a number of options for how to implement the parameterization
+# of the workflow. They key is that we need two levels of iterables: one on the
+# (subject, session) pairs and one on the runs. This is not neccessarily the
+# optimal implementation of how to do that.
+
+# Separately, we need to figure out how we want to ask the user to encode the
+# subject/session/run information.
+
 session_source = Node(IdentityInterface(["session"]),
                       name="session_source",
                       iterables=("session", [("rk", 1), ("rk", 2)]))
