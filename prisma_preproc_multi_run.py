@@ -81,7 +81,8 @@ sbref2se = Node(fsl.FLIRT(dof=6), "sbref2se")
 
 # --- Registration of SE-EPI (without distortions) to Freesurfer anatomy
 
-se2anat = Node(fs.BBRegister(contrast_type="t2",
+se2anat = Node(fs.BBRegister(init="fsl",
+                             contrast_type="t2",
                              out_reg_file="se2anat_tkreg.dat"),
                "se2anat")
 
