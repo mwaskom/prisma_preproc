@@ -106,6 +106,10 @@ average_se = Node(fsl.MeanImage(out_file="se_restored.nii.gz"), "average_se")
 # Select first warpfield image from output list
 select_warp = Node(utility.Select(index=[0]), "select_warp")
 
+# Define a mask of areas with large distortions
+mask_distortions = Node(fsl.ImageMaths(op_string="-abs -thr 4 -Tmax -binv"),
+                       "mask_distortions")
+
 # --- Registration of SBRef to SE-EPI (with distortions)
 
 sbref2se = Node(fsl.FLIRT(dof=6), "sbref2se")
@@ -237,6 +241,8 @@ workflow.connect([
         [("se", "in_file")]),
     (estimate_distortions, select_warp,
         [("out_warps", "inlist")]),
+    (select_warp, mask_distortions,
+        [("out", "in_file")]),
     (estimate_distortions, average_se,
         [("out_corrected", "in_file")]),
     (sesswise_info, se2anat,
@@ -262,6 +268,8 @@ workflow.connect([
         [("sbref", "in_file")]),
     (sesswise_input, sbref2se,
         [("se", "reference")]),
+    (mask_distortions, sbref2se,
+        [("out_file", "ref_weight")]),
     (ts2sbref, combine_rigids,
         [("mat_file", "in_file")]),
     (sbref2se, combine_rigids,
