@@ -1,9 +1,14 @@
 import os
 import argparse
 import nipype
-from nipype import (Workflow, Node, MapNode,
+from nipype import (Workflow, Node, MapNode, JoinNode,
                     Function, IdentityInterface, SelectFiles, DataSink)
+from nipype.interfaces.base import (traits, BaseInterface,
+                                    BaseInterfaceInputSpec, TraitedSpec,
+                                    File, InputMultiPath, OutputMultiPath)
 from nipype.interfaces import fsl, freesurfer as fs, utility
+
+from lyman.tools.submission import submit_cmdline
 
 data_dir = os.environ["SUBJECTS_DIR"]
 
@@ -127,8 +132,61 @@ sbref2se = Node(fsl.FLIRT(dof=6), "sbref2se")
 
 se2anat = Node(fs.BBRegister(init="fsl",
                              contrast_type="t2",
+                             out_fsl_file="se2anat_flirt.mat",
                              out_reg_file="se2anat_tkreg.dat"),
                "se2anat")
+
+# --- Definition of common cross-session space
+
+class NativeTransformInput(BaseInterfaceInputSpec):
+
+    session_info = traits.List(traits.Tuple())
+    in_matrices = InputMultiPath(File(exists=True))
+
+
+class NativeTransformOutput(TraitedSpec):
+
+    session_info = traits.List(traits.Tuple())
+    out_matrices = OutputMultiPath(File(exists=True))
+
+
+class NativeTransform(BaseInterface):
+
+    input_spec = NativeTransformInput
+    output_spec = NativeTransformOutput
+
+    def _list_outputs(self):
+
+        outputs = self._outputs().get()
+
+        outputs["session_info"] = self.inputs.session_info
+
+        out_matrices = [
+            os.path.abspath("se2native_{:04d}.mat".format(i))
+            for i, _ in enumerate(self.inputs.in_matrices, 1)
+            ]
+
+        outputs["out_matrices"] = out_matrices
+
+        return outputs
+
+    def _run_interface(self, runtime):
+
+        cmdline = ["midtrans",
+                   "--separate=se2native_",
+                   "--out=anat2mid.mat"]
+        cmdline.extend(self.inputs.in_matrices)
+
+        runtime = submit_cmdline(runtime, cmdline)
+
+        return runtime
+
+
+se2native = JoinNode(NativeTransform(),
+                     name="se2native",
+                     joinsource="session_source",
+                     joinfield=["session_info", "in_matrices"])
+
 
 # --- Motion correction of timeseries to SBRef (with distortions)
 
@@ -188,6 +246,10 @@ workflow.connect([
         [("subject", "subject_id")]),
     (average_se, se2anat,
         [("out_file", "source_file")]),
+    (session_source, se2native,
+        [("session", "session_info")]),
+    (se2anat, se2native,
+        [("out_fsl_file", "in_matrices")]),
     (runwise_input, ts2sbref,
         [("ts", "in_file"),
          ("sbref", "ref_file")]),
