@@ -174,7 +174,7 @@ class NativeTransform(BaseInterface):
 
         cmdline = ["midtrans",
                    "--separate=se2native_",
-                   "--out=anat2mid.mat"]
+                   "--out=anat2native.mat"]
         cmdline.extend(self.inputs.in_matrices)
 
         runtime = submit_cmdline(runtime, cmdline)
@@ -187,6 +187,20 @@ se2native = JoinNode(NativeTransform(),
                      joinsource="session_source",
                      joinfield=["session_info", "in_matrices"])
 
+
+def select_transform_func(in_matrices, session_info, subject, session):
+
+    for matrix, info in zip(in_matrices, session_info):
+        if info == (subject, session):
+            out_matrix = matrix
+    return out_matrix
+
+
+select_transform = Node(Function(["in_matrices", "session_info",
+                                  "subject", "session"],
+                                 "out_matrix",
+                                 select_transform_func),
+                        "select_transform")
 
 # --- Motion correction of timeseries to SBRef (with distortions)
 
@@ -250,6 +264,12 @@ workflow.connect([
         [("session", "session_info")]),
     (se2anat, se2native,
         [("out_fsl_file", "in_matrices")]),
+    (se2native, select_transform,
+        [("out_matrices", "in_matrices"),
+         ("session_info", "session_info")]),
+    (runwise_info, select_transform,
+        [("subject", "subject"),
+         ("session", "session")]),
     (runwise_input, ts2sbref,
         [("ts", "in_file"),
          ("sbref", "ref_file")]),
@@ -270,6 +290,8 @@ workflow.connect([
         [("out_file", "premat")]),
     (select_warp, restore_ts_frames,
         [("out", "field_file")]),
+    (select_transform, restore_ts_frames,
+        [("out_matrix", "postmat")]),
     (restore_ts_frames, merge_ts,
         [("out_file", "in_files")]),
     (average_se, file_output,
