@@ -2,7 +2,7 @@ import os
 import argparse
 import nipype
 from nipype import (Workflow, Node, MapNode,
-                    IdentityInterface, SelectFiles, DataSink)
+                    Function, IdentityInterface, SelectFiles, DataSink)
 from nipype.interfaces import fsl, freesurfer as fs, utility
 
 data_dir = os.environ["SUBJECTS_DIR"]
@@ -10,6 +10,27 @@ data_dir = os.environ["SUBJECTS_DIR"]
 # === Define pipeline nodes
 
 # --- Parameter specification
+
+"""
+
+Current status: all sorts of problems with parameter specification /
+parallelization. We can solve some by changing things to have three layers
+of iterables: subject / session /run. This will let us eventually collapse
+across-session / within-subject to get a common space. But we still have
+some complicated issues in applying thing across differnet levels of the
+workflow expansion. Next steps:
+
+1) rework the iterable specification
+2) test adding a JoinNode, which outptus a list, and then a downstream function
+   node that associates entries in the list with the appropriate data
+
+Separately due to concerns about motion changing the field we may want to have
+the flexibility to use multiple fieldmaps per session. Then we could either have
+the subject specify the mapping of fieldmaps to runs or compute all the pairwise
+transformations and select the "closest" fieldmap for each run. Not a bad idea!
+But so much complexity :/
+
+"""
 
 # TODO there are a number of options for how to implement the parameterization
 # of the workflow. They key is that we need two levels of iterables: one on the
@@ -19,24 +40,47 @@ data_dir = os.environ["SUBJECTS_DIR"]
 # Separately, we need to figure out how we want to ask the user to encode the
 # subject/session/run information.
 
-session_source = Node(IdentityInterface(["session"]),
+# --- Workflow parameterization
+
+subject_source = Node(IdentityInterface(["subject"]),
+                      name="subject_source",
+                      iterables=("subject", ["rk"]))
+
+session_source = Node(IdentityInterface(["subject", "session"]),
                       name="session_source",
-                      iterables=("session", [("rk", 1), ("rk", 2)]))
+                      itersource=("subject_source", "subject"),
+                      iterables=("session", {"rk": [("rk", 1), ("rk", 2)]}))
+
+run_source = Node(IdentityInterface(["subject", "session", "run"]),
+                      name="run_source",
+                      itersource=("session_source", "session"),
+                      iterables=("run", {("rk", 1): [("rk", 1, 1),
+                                                     ("rk", 1, 2)],
+                                         ("rk", 2): [("rk", 2, 1),
+                                                     ("rk", 2, 2),
+                                                     ("rk", 2, 3)]}))
 
 
-def session_info_func(session):
-    subject, session = session
-    return subject, session 
-session_info = Node(utility.Function("session", ["subject", "session"],
-                                     session_info_func),
-                    "session_info")
+# --- Semantic information
+
+def info_func(info_tuple):
+    try:
+        subject, session = info_tuple
+        return subject, session
+    except ValueError:
+        subject, session, run = info_tuple
+        return subject, session, run
+
+sesswise_info = Node(Function("info_tuple",
+                              ["subject", "session"],
+                              info_func),
+                     "sesswise_info")
 
 
-run_source = Node(IdentityInterface(["session", "run"]),
-                  name="run_source",
-                  itersource=("session_source", "session"),
-                  iterables=("run", {("rk", 1): [1, 2],
-                                     ("rk", 2): [1, 2, 3]}))
+runwise_info = Node(Function("info_tuple",
+                             ["subject", "session", "run"],
+                             info_func),
+                     "runwise_info")
 
 # --- Input file selection
 
@@ -117,25 +161,30 @@ file_output = Node(DataSink(base_directory=output_dir),
 workflow = Workflow(name="prisma_preproc_multirun", base_dir="nipype_cache")
 
 workflow.connect([
-    (session_source, session_info,
-        [("session", "session")]),
+    (subject_source, session_source,
+        [("subject", "subject")]),
+    (subject_source, run_source,
+        [("subject", "subject")]),
     (session_source, run_source,
         [("session", "session")]),
-    (session_info, sesswise_input,
+    (session_source, sesswise_info,
+        [("session", "info_tuple")]),
+    (run_source, runwise_info,
+        [("run", "info_tuple")]),
+    (sesswise_info, sesswise_input,
         [("subject", "subject"),
          ("session", "session")]),
-    (session_info, runwise_input,
+    (runwise_info, runwise_input,
         [("subject", "subject"),
-         ("session", "session")]),
-    (run_source, runwise_input,
-        [("run", "run")]),
+         ("session", "session"),
+         ("run", "run")]),
     (sesswise_input, estimate_distortions,
         [("se", "in_file")]),
     (estimate_distortions, select_warp,
         [("out_warps", "inlist")]),
     (estimate_distortions, average_se,
         [("out_corrected", "in_file")]),
-    (session_info, se2anat,
+    (sesswise_info, se2anat,
         [("subject", "subject_id")]),
     (average_se, se2anat,
         [("out_file", "source_file")]),
@@ -153,7 +202,8 @@ workflow.connect([
     (sbref2se, combine_rigids,
         [("out_matrix_file", "in_file2")]),
     (split_ts, restore_ts_frames,
-        [("out_files", "in_file"), ("out_files", "ref_file")]),
+        [("out_files", "in_file"),
+         ("out_files", "ref_file")]),
     (combine_rigids, restore_ts_frames,
         [("out_file", "premat")]),
     (select_warp, restore_ts_frames,
