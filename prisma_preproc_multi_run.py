@@ -170,6 +170,6 @@ workflow.connect([
 
 if __name__ == "__main__":
 
-    workflow.write_graph("prisma_preproc", "orig", "svg")
+    workflow.write_graph("prisma_preproc_multirun", "exec", "svg")
     workflow.config["crashdump_dir"] = os.path.realpath("crashdumps")
     workflow.run("MultiProc", dict(n_procs=24))
