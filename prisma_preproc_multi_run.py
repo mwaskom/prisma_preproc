@@ -18,32 +18,13 @@ data_dir = os.environ["SUBJECTS_DIR"]
 
 """
 
-Current status: all sorts of problems with parameter specification /
-parallelization. We can solve some by changing things to have three layers
-of iterables: subject / session /run. This will let us eventually collapse
-across-session / within-subject to get a common space. But we still have
-some complicated issues in applying thing across differnet levels of the
-workflow expansion. Next steps:
-
-1) rework the iterable specification
-2) test adding a JoinNode, which outptus a list, and then a downstream function
-   node that associates entries in the list with the appropriate data
-
-Separately due to concerns about motion changing the field we may want to have
-the flexibility to use multiple fieldmaps per session. Then we could either have
-the subject specify the mapping of fieldmaps to runs or compute all the pairwise
-transformations and select the "closest" fieldmap for each run. Not a bad idea!
-But so much complexity :/
+Due to concerns about motion changing the field we may want to have the
+flexibility to use multiple fieldmaps per session. Then we could either have
+the subject specify the mapping of fieldmaps to runs or compute all the
+pairwise transformations and select the "closest" fieldmap for each run. Not a
+bad idea!  But so much complexity!
 
 """
-
-# TODO there are a number of options for how to implement the parameterization
-# of the workflow. They key is that we need two levels of iterables: one on the
-# (subject, session) pairs and one on the runs. This is not neccessarily the
-# optimal implementation of how to do that.
-
-# Separately, we need to figure out how we want to ask the user to encode the
-# subject/session/run information.
 
 # --- Workflow parameterization
 
@@ -57,13 +38,13 @@ session_source = Node(IdentityInterface(["subject", "session"]),
                       iterables=("session", {"rk": [("rk", 1), ("rk", 2)]}))
 
 run_source = Node(IdentityInterface(["subject", "session", "run"]),
-                      name="run_source",
-                      itersource=("session_source", "session"),
-                      iterables=("run", {("rk", 1): [("rk", 1, 1),
-                                                     ("rk", 1, 2)],
-                                         ("rk", 2): [("rk", 2, 1),
-                                                     ("rk", 2, 2),
-                                                     ("rk", 2, 3)]}))
+                  name="run_source",
+                  itersource=("session_source", "session"),
+                  iterables=("run", {("rk", 1): [("rk", 1, 1),
+                                                 ("rk", 1, 2)],
+                                     ("rk", 2): [("rk", 2, 1),
+                                                 ("rk", 2, 2),
+                                                 ("rk", 2, 3)]}))
 
 
 # --- Semantic information
@@ -76,6 +57,7 @@ def info_func(info_tuple):
         subject, session, run = info_tuple
         return subject, session, run
 
+
 sesswise_info = Node(Function("info_tuple",
                               ["subject", "session"],
                               info_func),
@@ -85,7 +67,7 @@ sesswise_info = Node(Function("info_tuple",
 runwise_info = Node(Function("info_tuple",
                              ["subject", "session", "run"],
                              info_func),
-                     "runwise_info")
+                    "runwise_info")
 
 # --- Input file selection
 
@@ -135,6 +117,7 @@ se2anat = Node(fs.BBRegister(init="fsl",
                              out_fsl_file="se2anat_flirt.mat",
                              out_reg_file="se2anat_tkreg.dat"),
                "se2anat")
+
 
 # --- Definition of common cross-session space
 
