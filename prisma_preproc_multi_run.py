@@ -129,12 +129,15 @@ class NativeTransformInput(BaseInterfaceInputSpec):
 
     session_info = traits.List(traits.Tuple())
     in_matrices = InputMultiPath(File(exists=True))
+    in_volumes = InputMultiPath(File(exists=True))
 
 
 class NativeTransformOutput(TraitedSpec):
 
     session_info = traits.List(traits.Tuple())
     out_matrices = OutputMultiPath(File(exists=True))
+    out_flirt_file = File(exists=True)
+    out_tkreg_file = File(exists=True)
 
 
 class NativeTransform(BaseInterface):
@@ -155,14 +158,57 @@ class NativeTransform(BaseInterface):
 
         outputs["out_matrices"] = out_matrices
 
+        outputs["out_flirt_file"] = os.path.abspath("native2anat_flirt.mat")
+        outputs["out_tkreg_file"] = os.path.abspath("native2anat_tkreg.dat")
+
         return outputs
 
     def _run_interface(self, runtime):
 
+        subjects_dir = os.environ["SUBJECTS_DIR"]
+        subj = set([s for s, _ in self.inputs.session_info]).pop()
+
+        # Conver the anatomical image to nifit
+        cmdline = ["mri_convert",
+                   os.path.join(subjects_dir, subj, "mri/orig.mgz"),
+                   "orig.nii.gz"]
+
+        runtime = submit_cmdline(runtime, cmdline)
+
+        # Compute the intermediate transform
         cmdline = ["midtrans",
+                   "--template=orig.nii.gz",
                    "--separate=se2native_",
                    "--out=anat2native.mat"]
         cmdline.extend(self.inputs.in_matrices)
+
+        runtime = submit_cmdline(runtime, cmdline)
+
+        # Invert the anat2native transformation
+        cmdline = ["convert_xfm",
+                   "-omat", "native2anat_flirt.mat",
+                   "-inverse",
+                   "anat2native.mat"]
+
+        runtime = submit_cmdline(runtime, cmdline)
+
+        # Transform the first volume into the native space to get the geometry
+        cmdline = ["flirt",
+                   "-in", self.inputs.in_volumes[0],
+                   "-ref", self.inputs.in_volumes[0],
+                   "-init", "se2native_0001.mat",
+                   "-out", "se_native_0001.nii.gz",
+                   "-applyxfm"]
+
+        runtime = submit_cmdline(runtime, cmdline)
+
+        # Convert the tkreg matrix format
+        cmdline = ["tkregister2",
+                   "--s", subj,
+                   "--mov", "se_native_0001.nii.gz",
+                   "--fsl", "native2anat_flirt.mat",
+                   "--reg", "native2anat_tkreg.dat",
+                   "--noedit"]
 
         runtime = submit_cmdline(runtime, cmdline)
 
@@ -172,7 +218,7 @@ class NativeTransform(BaseInterface):
 se2native = JoinNode(NativeTransform(),
                      name="se2native",
                      joinsource="session_source",
-                     joinfield=["session_info", "in_matrices"])
+                     joinfield=["session_info", "in_matrices", "in_volumes"])
 
 
 def select_transform_func(in_matrices, session_info, subject, session):
@@ -251,6 +297,8 @@ workflow.connect([
         [("out_file", "source_file")]),
     (session_source, se2native,
         [("session", "session_info")]),
+    (sesswise_input, se2native,
+        [("se", "in_volumes")]),
     (se2anat, se2native,
         [("out_fsl_file", "in_matrices")]),
     (se2native, select_transform,
@@ -285,12 +333,10 @@ workflow.connect([
         [("out_matrix", "postmat")]),
     (restore_ts_frames, merge_ts,
         [("out_file", "in_files")]),
-    (average_se, file_output,
-        [("out_file", "@average_se")]),
     (merge_ts, file_output,
         [("merged_file", "@restored_timeseries")]),
-    (se2anat, file_output,
-        [("out_reg_file", "@tkreg_file")]),
+    (se2native, file_output,
+        [("out_tkreg_file", "@tkreg_file")]),
 ])
 
 if __name__ == "__main__":
