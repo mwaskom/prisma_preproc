@@ -179,7 +179,7 @@ class NativeTransform(BaseInterface):
         cmdline = ["midtrans",
                    "--template=orig.nii.gz",
                    "--separate=se2native_",
-                   "--out=anat2native.mat"]
+                   "--out=anat2native_flirt.mat"]
         cmdline.extend(self.inputs.in_matrices)
 
         runtime = submit_cmdline(runtime, cmdline)
@@ -188,7 +188,7 @@ class NativeTransform(BaseInterface):
         cmdline = ["convert_xfm",
                    "-omat", "native2anat_flirt.mat",
                    "-inverse",
-                   "anat2native.mat"]
+                   "anat2native_flirt.mat"]
 
         runtime = submit_cmdline(runtime, cmdline)
 
@@ -202,7 +202,7 @@ class NativeTransform(BaseInterface):
 
         runtime = submit_cmdline(runtime, cmdline)
 
-        # Convert the tkreg matrix format
+        # Convert the FSL matrices to tkreg matrix format
         cmdline = ["tkregister2",
                    "--s", subj,
                    "--mov", "se_native_0001.nii.gz",
@@ -221,6 +221,8 @@ se2native = JoinNode(NativeTransform(),
                      joinfield=["session_info", "in_matrices", "in_volumes"])
 
 
+# --- Associate native-space transformations with data from correct session
+
 def select_transform_func(in_matrices, session_info, subject, session):
 
     for matrix, info in zip(in_matrices, session_info):
@@ -229,11 +231,36 @@ def select_transform_func(in_matrices, session_info, subject, session):
     return out_matrix
 
 
-select_transform = Node(Function(["in_matrices", "session_info",
-                                  "subject", "session"],
-                                 "out_matrix",
-                                 select_transform_func),
-                        "select_transform")
+select_sesswise = Node(Function(["in_matrices", "session_info",
+                                 "subject", "session"],
+                                "out_matrix",
+                                select_transform_func),
+                           "select_sesswise")
+
+select_runwise = select_sesswise.clone("select_runwise")
+
+# --- Restore each sessions SE image in native space then average
+
+split_se = Node(fsl.Split(dimension="t"), "split_se")
+
+# TODO here (and below) we need to change the reference file to fix the affine
+restore_se = MapNode(fsl.ApplyWarp(interp="spline", relwarp=True),
+                     ["in_file", "ref_file", "premat", "field_file"],
+                     "restore_se")
+
+def flatten_file_list(in_files):
+    out_files = [item for sublist in in_files for item in sublist]
+    return out_files
+
+combine_se = JoinNode(Function("in_files", "out_files", flatten_file_list),
+                      name="combine_se",
+                      joinsource="session_source",
+                      joinfield=["in_files"])
+
+merge_se = Node(fsl.Merge(dimension="t"), name="merge_se")
+
+average_native = Node(fsl.MeanImage(out_file="se_native.nii.gz"),
+                      name="average_native")
 
 # --- Motion correction of timeseries to SBRef (with distortions)
 
@@ -301,12 +328,28 @@ workflow.connect([
         [("se", "in_volumes")]),
     (se2anat, se2native,
         [("out_fsl_file", "in_matrices")]),
-    (se2native, select_transform,
+    (se2native, select_sesswise,
         [("out_matrices", "in_matrices"),
          ("session_info", "session_info")]),
-    (runwise_info, select_transform,
+    (sesswise_info, select_sesswise,
         [("subject", "subject"),
          ("session", "session")]),
+    (sesswise_input, split_se,
+        [("se", "in_file")]),
+    (split_se, restore_se,
+        [("out_files", "in_file"),
+         ("out_files", "ref_file")]),
+    (estimate_distortions, restore_se,
+        [("out_mats", "premat"),
+         ("out_warps", "field_file")]),
+    (select_sesswise, restore_se,
+        [("out_matrix", "postmat")]),
+    (restore_se, combine_se,
+        [("out_file", "in_files")]),
+    (combine_se, merge_se,
+        [("out_files", "in_files")]),
+    (merge_se, average_native,
+        [("merged_file", "in_file")]),
     (runwise_input, ts2sbref,
         [("ts", "in_file"),
          ("sbref", "ref_file")]),
@@ -329,10 +372,18 @@ workflow.connect([
         [("out_file", "premat")]),
     (select_warp, restore_ts_frames,
         [("out", "field_file")]),
-    (select_transform, restore_ts_frames,
+    (se2native, select_runwise,
+        [("out_matrices", "in_matrices"),
+         ("session_info", "session_info")]),
+    (runwise_info, select_runwise,
+        [("subject", "subject"),
+         ("session", "session")]),
+    (select_runwise, restore_ts_frames,
         [("out_matrix", "postmat")]),
     (restore_ts_frames, merge_ts,
         [("out_file", "in_files")]),
+    (average_native, file_output,
+        [("out_file", "@se_native")]),
     (merge_ts, file_output,
         [("merged_file", "@restored_timeseries")]),
     (se2native, file_output,
