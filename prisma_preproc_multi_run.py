@@ -135,6 +135,7 @@ class NativeTransformInput(BaseInterfaceInputSpec):
 class NativeTransformOutput(TraitedSpec):
 
     session_info = traits.List(traits.Tuple())
+    out_template = File(exists=True)
     out_matrices = OutputMultiPath(File(exists=True))
     out_flirt_file = File(exists=True)
     out_tkreg_file = File(exists=True)
@@ -158,6 +159,7 @@ class NativeTransform(BaseInterface):
 
         outputs["out_matrices"] = out_matrices
 
+        outputs["out_template"] = os.path.abspath("native_template.nii.gz")
         outputs["out_flirt_file"] = os.path.abspath("native2anat_flirt.mat")
         outputs["out_tkreg_file"] = os.path.abspath("native2anat_tkreg.dat")
 
@@ -197,7 +199,7 @@ class NativeTransform(BaseInterface):
                    "-in", self.inputs.in_volumes[0],
                    "-ref", self.inputs.in_volumes[0],
                    "-init", "se2native_0001.mat",
-                   "-out", "se_native_0001.nii.gz",
+                   "-out", "native_template.nii.gz",
                    "-applyxfm"]
 
         runtime = submit_cmdline(runtime, cmdline)
@@ -205,7 +207,7 @@ class NativeTransform(BaseInterface):
         # Convert the FSL matrices to tkreg matrix format
         cmdline = ["tkregister2",
                    "--s", subj,
-                   "--mov", "se_native_0001.nii.gz",
+                   "--mov", "native_template.nii.gz",
                    "--fsl", "native2anat_flirt.mat",
                    "--reg", "native2anat_tkreg.dat",
                    "--noedit"]
@@ -223,16 +225,17 @@ se2native = JoinNode(NativeTransform(),
 
 # --- Associate native-space transformations with data from correct session
 
-def select_transform_func(in_matrices, session_info, subject, session):
+def select_transform_func(session_info, subject, session, in_matrices):
 
-    for matrix, info in zip(in_matrices, session_info):
+    for info, matrix in zip(session_info, in_matrices):
         if info == (subject, session):
             out_matrix = matrix
     return out_matrix
 
 
-select_sesswise = Node(Function(["in_matrices", "session_info",
-                                 "subject", "session"],
+select_sesswise = Node(Function(["session_info",
+                                 "subject", "session",
+                                 "in_matrices"],
                                 "out_matrix",
                                 select_transform_func),
                            "select_sesswise")
@@ -243,9 +246,8 @@ select_runwise = select_sesswise.clone("select_runwise")
 
 split_se = Node(fsl.Split(dimension="t"), "split_se")
 
-# TODO here (and below) we need to change the reference file to fix the affine
 restore_se = MapNode(fsl.ApplyWarp(interp="spline", relwarp=True),
-                     ["in_file", "ref_file", "premat", "field_file"],
+                     ["in_file", "premat", "field_file"],
                      "restore_se")
 
 def flatten_file_list(in_files):
@@ -277,7 +279,8 @@ combine_rigids = MapNode(fsl.ConvertXFM(concat_xfm=True),
 
 # Simultaneously apply rigid transform and nonlinear warpfield
 restore_ts_frames = MapNode(fsl.ApplyWarp(interp="spline", relwarp=True),
-                            ["in_file", "ref_file", "premat"], "restore_ts")
+                            ["in_file", "premat"],
+                            "restore_ts")
 
 # Recombine the timeseries frames into a 4D image
 merge_ts = Node(fsl.Merge(merged_file="ts_restored.nii.gz",
@@ -330,6 +333,7 @@ workflow.connect([
         [("out_fsl_file", "in_matrices")]),
     (se2native, select_sesswise,
         [("out_matrices", "in_matrices"),
+         ("out_template", "in_templates"),
          ("session_info", "session_info")]),
     (sesswise_info, select_sesswise,
         [("subject", "subject"),
@@ -337,11 +341,12 @@ workflow.connect([
     (sesswise_input, split_se,
         [("se", "in_file")]),
     (split_se, restore_se,
-        [("out_files", "in_file"),
-         ("out_files", "ref_file")]),
+        [("out_files", "in_file")]),
     (estimate_distortions, restore_se,
         [("out_mats", "premat"),
          ("out_warps", "field_file")]),
+    (se2native, restore_se,
+        [("out_template", "ref_file")]),
     (select_sesswise, restore_se,
         [("out_matrix", "postmat")]),
     (restore_se, combine_se,
@@ -366,8 +371,7 @@ workflow.connect([
     (sbref2se, combine_rigids,
         [("out_matrix_file", "in_file2")]),
     (split_ts, restore_ts_frames,
-        [("out_files", "in_file"),
-         ("out_files", "ref_file")]),
+        [("out_files", "in_file")]),
     (combine_rigids, restore_ts_frames,
         [("out_file", "premat")]),
     (select_warp, restore_ts_frames,
