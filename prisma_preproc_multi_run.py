@@ -286,7 +286,11 @@ restore_ts_frames = MapNode(fsl.ApplyWarp(interp="spline", relwarp=True),
 merge_ts = Node(fsl.Merge(merged_file="ts_restored.nii.gz",
                           dimension="t"), "merge_ts")
 
-# Save out important results
+# Take a temporal average of the timeseries
+average_ts = Node(fsl.MeanImage(out_file="mean_restored.nii.gz"), "average_ts")
+
+# --- Workflow ouptut
+
 output_dir = os.path.realpath("python_script_outputs")
 file_output = Node(DataSink(base_directory=output_dir),
                    "file_output")
@@ -382,14 +386,20 @@ workflow.connect([
     (runwise_info, select_runwise,
         [("subject", "subject"),
          ("session", "session")]),
+    (se2native, restore_ts_frames,
+        [("out_template", "ref_file")]),
     (select_runwise, restore_ts_frames,
         [("out_matrix", "postmat")]),
     (restore_ts_frames, merge_ts,
         [("out_file", "in_files")]),
-    (average_native, file_output,
-        [("out_file", "@se_native")]),
+    (merge_ts, average_ts,
+        [("merged_file", "in_file")]),
     (merge_ts, file_output,
         [("merged_file", "@restored_timeseries")]),
+    (average_ts, file_output,
+        [("out_file", "@mean_func")]),
+    (average_native, file_output,
+        [("out_file", "@se_native")]),
     (se2native, file_output,
         [("out_tkreg_file", "@tkreg_file")]),
 ])
