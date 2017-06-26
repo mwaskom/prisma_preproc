@@ -266,7 +266,7 @@ average_native = Node(fsl.MeanImage(out_file="se_native.nii.gz"),
 
 # --- Motion correction of timeseries to SBRef (with distortions)
 
-ts2sbref = Node(fsl.MCFLIRT(save_mats=True, save_rms=True, save_plots=True),
+ts2sbref = Node(fsl.MCFLIRT(save_mats=True, save_plots=True),
                 "ts2sbref")
 
 # --- Combined motion correction and unwarping of timeseries
@@ -400,8 +400,7 @@ workflow.connect([
     (average_ts, file_output,
         [("out_file", "@mean_func")]),
     (ts2sbref, file_output,
-        [("par_file", "@realign_params"),
-         ("rms_files", "@displace_params")]),
+        [("par_file", "@realign_params")]),
     (average_native, file_output,
         [("out_file", "@se_native")]),
     (se2native, file_output,
