@@ -45,12 +45,14 @@ mni_mask = fsl.Info.standard_image("MNI152_T1_2mm_brain_mask.nii.gz")
 
 normalize_linear = Node(fsl.FLIRT(dof=12,
                                   reference=mni_template,
+                                  ref_weight=mni_mask,
                                   interp="spline"),
                         "normalize_linear")
 
 normalize_nonlinear = Node(fsl.FNIRT(config_file="T1_2_MNI152_2mm",
                                      ref_file=mni_template,
-                                     refmask_file=mni_mask),
+                                     refmask_file=mni_mask,
+                                     fieldcoeff_file=True),
                            "normalize_nonlinear")
 
 # --- Invert the warpfield and bring the MNI mask into native space
