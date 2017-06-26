@@ -45,7 +45,6 @@ mni_mask = fsl.Info.standard_image("MNI152_T1_2mm_brain_mask.nii.gz")
 
 normalize_linear = Node(fsl.FLIRT(dof=12,
                                   reference=mni_template,
-                                  ref_weight=mni_mask,
                                   interp="spline"),
                         "normalize_linear")
 
@@ -62,23 +61,21 @@ invert_warp = Node(fsl.InvWarp(), "invert_warp")
 warp_mask = Node(fsl.ApplyWarp(in_file=mni_mask, interp="nn"),
                  "warp_mask")
 
-fill_mask = Node(fsl.ImageMaths(op_string="fillh"), "fill_mask")
+fill_mask = Node(fsl.ImageMaths(op_string="-fillh"), "fill_mask")
 
 dilate_mask = Node(fsl.DilateImage(operation="max"), "dilate_mask")
 
 # --- Register the T2w to the T1w volume
 
-# Technically better but takes forever, and given smoothing of
-# bias field the difference is likely of no consequence
-# robust_args = "--cost ROBENT --entradius 2 --entcorrection"
-# register_between = Node(fs.RobustRegister(est_int_scale=True,
-#                                           auto_sens=True,
-#                                           args=robust_args,
-#                                           registered_file="T2w.nii.gz"),
-#                         "register_between")
-
-register_between = Node(fsl.FLIRT(dof=6, interp="spline"),
+robust_args = "--cost ROBENT --entradius 2 --entcorrection"
+register_between = Node(fs.RobustRegister(est_int_scale=True,
+                                          auto_sens=True,
+                                          args=robust_args,
+                                          registered_file="T2w.nii.gz"),
                         "register_between")
+
+# register_between = Node(fsl.FLIRT(dof=6, interp="spline"),
+#                         "register_between")
 
 # --- Build the workflow
 
@@ -113,12 +110,16 @@ workflow.connect([
         [("out_file", "in_file")]),
     (fill_mask, dilate_mask,
         [("out_file", "in_file")]),
+    #(register_t1w, register_between,
+    #    [("out_file", "reference")]),
+    #(register_t2w, register_between,
+    #    [("out_file", "in_file")]),
+    #(dilate_mask, register_between,
+    #    [("out_file", "ref_weight")]),
     (register_t1w, register_between,
-        [("out_file", "reference")]),
+        [("out_file", "target_file")]),
     (register_t2w, register_between,
-        [("out_file", "in_file")]),
-    (dilate_mask, register_between,
-        [("out_file", "ref_weight")]),
+        [("out_file", "source_file")]),
 ])
 
 
