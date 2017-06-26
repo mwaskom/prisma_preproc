@@ -1,7 +1,12 @@
 import os
+import numpy as np
+from scipy.ndimage import gaussian_filter
+import nibabel as nib
 from nipype import (Workflow, Node, MapNode,
-                    Function, IdentityInterface, SelectFiles, DataSink)
-from nipype.interfaces import fsl, freesurfer as fs, utility
+                    IdentityInterface, SelectFiles, DataSink)
+from nipype.interfaces.base import (BaseInterface, BaseInterfaceInputSpec,
+                                    TraitedSpec, File, traits)
+from nipype.interfaces import fsl, freesurfer as fs
 
 
 data_dir = os.environ["SUBJECTS_DIR"]
@@ -77,6 +82,90 @@ register_between = Node(fs.RobustRegister(est_int_scale=True,
 # register_between = Node(fsl.FLIRT(dof=6, interp="spline"),
 #                         "register_between")
 
+# --- Compute the bias field
+
+
+class BiasCorrectInput(BaseInterfaceInputSpec):
+
+    t1w_file = File(exists=True)
+    t2w_file = File(exists=True)
+    mask_file = File(exists=True)
+    smooth_sigma = traits.Float(5, usedefault=True)
+
+
+class BiasCorrectOutput(TraitedSpec):
+
+    t1w_file = File(exists=True)
+    t2w_file = File(exists=True)
+    bias_file = File(exists=True)
+    smoothed_bias_file = File(exists=True)
+
+
+class BiasCorrect(BaseInterface):
+
+    input_spec = BiasCorrectInput
+    output_spec = BiasCorrectOutput
+
+    def _list_outputs(self):
+        return self._results
+
+    def run_interface(self, runtime):
+
+        self._results = dict()
+
+        # Load the input data
+        t1w_img = nib.load(self.inputs.t1w_file)
+        t2w_img = nib.load(self.inputs.t2w_file)
+        t1w_data, t2w_data = t1w_img.get_data(), t2w_img.get_data()
+        mask = nib.load(self.inputs.mask_file).get_data()
+
+        # Compute and save the bias field
+        bias_data = np.sqrt(np.abs(t1w_data * t2w_data))
+        bias_data *= mask
+        bias_data /= bias_data[mask.astype(bool)].mean()
+
+        bias_img = nib.Nift1Image(bias_data, t1w_img.affine, t1w_img.header)
+        bias_file = os.path.abspath("bias_field.nii.gz")
+        self._results["bias_file"] = bias_file
+        nib.save(bias_img, bias_file)
+
+        # Define smoothing sigma in voxel units (note assumes isotropic)
+        voxel_res = t1w_img.header.get_zooms()[0]
+        voxel_sigma = self.inputs.smooth_sigma / voxel_res
+
+        # Smooth the bias field within the brain mask
+        smoothed_bias = gaussian_filter(bias_data, voxel_sigma)
+        smoothed_mask = gaussian_filter(mask.astype(np.float), voxel_sigma)
+        smoothed_bias /= smoothed_mask
+        smoothed_bias *= mask
+        smoothed_bias = np.nan_to_num(smoothed_bias)
+
+        # Save out the smoothed bias field
+        smoothed_bias_file = os.path.abspath("bias_field_smoothed.nii.gz")
+        self._results["smoothed_bias_file"] = smoothed_bias_file
+        nib.save(nib.Nifti1Image(smoothed_bias,
+                                 t1w_img.affine, t1w_img.header),
+                 smoothed_bias_file)
+
+        # Bias-correct and save the T1w image
+        t1w_corrected = np.nan_to_num(t1w_data / smoothed_bias)
+        t1w_file = os.path.abspath("T1w.nii.gz")
+        self._results["t1w_file"] = t1w_file
+        nib.save(nib.Nifti1Image(t1w_corrected,
+                                 t1w_img.affine, t1w_img.header), t1w_file)
+
+        # Bias-correct and save the T1w image
+        t2w_corrected = np.nan_to_num(t2w_data / smoothed_bias)
+        t2w_file = os.path.abspath("T2w.nii.gz")
+        self._results["t2w_file"] = t2w_file
+        nib.save(nib.Nifti1Image(t2w_corrected,
+                                 t2w_img.affine, t2w_img.header), t2w_file)
+
+        return runtime
+
+
+correct_bias = Node(BiasCorrect(), "compute_bias")
+
 # --- Build the workflow
 
 workflow = Workflow(name="prisma_anat", base_dir="nipype_cache")
@@ -120,6 +209,12 @@ workflow.connect([
         [("out_file", "target_file")]),
     (register_t2w, register_between,
         [("out_file", "source_file")]),
+    (register_t1w, correct_bias,
+        [("out_file", "t1w_file")]),
+    (register_between, correct_bias,
+        [("registered_file", "t2w_file")]),
+    (dilate_mask, correct_bias,
+        [("out_file", "mask_file")]),
 ])
 
 
