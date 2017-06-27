@@ -46,7 +46,7 @@ register_t2w.inputs.out_file = "T2w.nii.gz"
 # --- Register the T1w volume to the MNI template
 
 mni_template = fsl.Info.standard_image("MNI152_T1_2mm.nii.gz")
-mni_mask = fsl.Info.standard_image("MNI152_T1_2mm_brain_mask.nii.gz")
+mni_mask = fsl.Info.standard_image("MNI152_T1_2mm_brain_mask_dil.nii.gz")
 
 normalize_linear = Node(fsl.FLIRT(dof=12,
                                   reference=mni_template,
@@ -72,11 +72,14 @@ dilate_mask = Node(fsl.DilateImage(operation="max"), "dilate_mask")
 
 # --- Register the T2w to the T1w volume
 
+parallelization = dict(OMP_NUM_THREADS="32")
 robust_args = "--cost ROBENT --entradius 2 --entcorrection"
-register_between = Node(fs.RobustRegister(est_int_scale=True,
+register_between = Node(fs.RobustRegister(registered_file=True,
+                                          est_int_scale=True,
                                           auto_sens=True,
                                           args=robust_args,
-                                          registered_file="T2w.nii.gz"),
+                                          environ=parallelization
+                                          ),
                         "register_between")
 
 # register_between = Node(fsl.FLIRT(dof=6, interp="spline"),
@@ -109,9 +112,11 @@ class BiasCorrect(BaseInterface):
     def _list_outputs(self):
         return self._results
 
-    def run_interface(self, runtime):
+    def _run_interface(self, runtime):
 
         self._results = dict()
+
+        old_settings = np.seterr(all="ignore")
 
         # Load the input data
         t1w_img = nib.load(self.inputs.t1w_file)
@@ -124,7 +129,7 @@ class BiasCorrect(BaseInterface):
         bias_data *= mask
         bias_data /= bias_data[mask.astype(bool)].mean()
 
-        bias_img = nib.Nift1Image(bias_data, t1w_img.affine, t1w_img.header)
+        bias_img = nib.Nifti1Image(bias_data, t1w_img.affine, t1w_img.header)
         bias_file = os.path.abspath("bias_field.nii.gz")
         self._results["bias_file"] = bias_file
         nib.save(bias_img, bias_file)
@@ -137,8 +142,7 @@ class BiasCorrect(BaseInterface):
         smoothed_bias = gaussian_filter(bias_data, voxel_sigma)
         smoothed_mask = gaussian_filter(mask.astype(np.float), voxel_sigma)
         smoothed_bias /= smoothed_mask
-        smoothed_bias *= mask
-        smoothed_bias = np.nan_to_num(smoothed_bias)
+        smoothed_bias = np.nan_to_num(smoothed_bias) * mask
 
         # Save out the smoothed bias field
         smoothed_bias_file = os.path.abspath("bias_field_smoothed.nii.gz")
@@ -148,23 +152,25 @@ class BiasCorrect(BaseInterface):
                  smoothed_bias_file)
 
         # Bias-correct and save the T1w image
-        t1w_corrected = np.nan_to_num(t1w_data / smoothed_bias)
+        t1w_corrected = np.nan_to_num(t1w_data / smoothed_bias) * mask
         t1w_file = os.path.abspath("T1w.nii.gz")
         self._results["t1w_file"] = t1w_file
         nib.save(nib.Nifti1Image(t1w_corrected,
                                  t1w_img.affine, t1w_img.header), t1w_file)
 
         # Bias-correct and save the T1w image
-        t2w_corrected = np.nan_to_num(t2w_data / smoothed_bias)
+        t2w_corrected = np.nan_to_num(t2w_data / smoothed_bias) * mask
         t2w_file = os.path.abspath("T2w.nii.gz")
         self._results["t2w_file"] = t2w_file
         nib.save(nib.Nifti1Image(t2w_corrected,
                                  t2w_img.affine, t2w_img.header), t2w_file)
 
+        np.seterr(**old_settings)
+
         return runtime
 
 
-correct_bias = Node(BiasCorrect(), "compute_bias")
+correct_bias = Node(BiasCorrect(), "correct_bias")
 
 # --- Build the workflow
 
@@ -197,8 +203,8 @@ workflow.connect([
         [("inverse_warp", "field_file")]),
     (warp_mask, fill_mask,
         [("out_file", "in_file")]),
-    (fill_mask, dilate_mask,
-        [("out_file", "in_file")]),
+    #(fill_mask, dilate_mask,
+    #    [("out_file", "in_file")]),
     #(register_t1w, register_between,
     #    [("out_file", "reference")]),
     #(register_t2w, register_between,
@@ -213,7 +219,7 @@ workflow.connect([
         [("out_file", "t1w_file")]),
     (register_between, correct_bias,
         [("registered_file", "t2w_file")]),
-    (dilate_mask, correct_bias,
+    (fill_mask, correct_bias,
         [("out_file", "mask_file")]),
 ])
 
