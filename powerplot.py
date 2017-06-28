@@ -11,7 +11,6 @@ class PowerPlot(object):
     def __init__(self, data, wmparc, realign_params=None,
                  smooth_sigma=3, random_seed=0):
 
-        print("Loading data")
         if isinstance(data, str):
             img = nib.load(data)
         else:
@@ -28,26 +27,21 @@ class PowerPlot(object):
         self.tr = tr
         self.ntp = data.shape[-1]
 
-        print("Converting data to percent signal change")
         data = self.percent_change(data)
-        print("Detrending data")
         self.data = data = detrend(data)
-        print("Defining image components")
         self.components = components = self.define_components(wmparc)
-        print("Smoothing data within-component")
         self.data = data = self.smooth_data(data, components, smooth_sigma)
-        print("Extracting data from each component")
         self.segdata = segdata = self.segment_data(data, components)
-        print("Computing framewise displacement")
         self.fd = fd = self.framewise_displacement(realign_params)
 
-        print("Plotting")
         f, axes = self.setup_figure()
         self.f, self.axes = f, axes
 
         self.plot_fd(axes[0], fd)
         self.plot_data(axes[1], segdata)
         f.tight_layout(h_pad=0, w_pad=0)
+
+        self.add_colorbar(f)
 
     def percent_change(self, data):
 
@@ -119,9 +113,6 @@ class PowerPlot(object):
     def setup_figure(self):
 
         width, height = 8, 10
-
-        f = plt.figure(figsize=(width, height)
-
         f, axes = plt.subplots(2, figsize=(width, height), sharex=True,
                                gridspec_kw=dict(height_ratios=(.1, .9)))
 
@@ -132,7 +123,7 @@ class PowerPlot(object):
         if fd is None:
             pass
 
-        ax.plot(fd)
+        ax.plot(np.arange(1, len(fd) + 1), fd)
         ax.set(ylabel="FD (mm)")
         if fd.max() < .2:
             ax.set(ylim=(0, .2))
@@ -143,25 +134,37 @@ class PowerPlot(object):
 
         rs = np.random.RandomState(0)
 
+        sizes = [800, 200, 200, 500, 200, 100]
+        components = ["cortex", "subgm", "cerbel", "supwm", "deepwm", "csf"]
+        names = ["Cortex", "Subcort.", "Cerebel.", "Sup. WM", "Deep WM", "CSF"]
+
         plot_data = np.vstack([
-            self._subsample(segdata["cortex"], 600, rs),
-            self._subsample(segdata["subgm"], 200, rs),
-            self._subsample(segdata["cerbel"], 200, rs),
-            self._subsample(segdata["supwm"], 400, rs),
-            self._subsample(segdata["deepwm"], 400, rs),
-            self._subsample(segdata["csf"], 200, rs),
-            ])
+            self._subsample(segdata[comp], size, rs)
+            for comp, size in zip(components, sizes)
+        ])
 
         ax.imshow(plot_data, aspect="auto", cmap="gray", vmin=-2, vmax=2)
 
-        ax.axhline(600, c="w")
-        ax.axhline(800, c="w")
-        ax.axhline(1000, c="w")
-        ax.axhline(1400, c="w")
-        ax.axhline(1800, c="w")
+        cum_sizes = np.cumsum(sizes)
 
-        ax.set(yticks=[])
+        for y in cum_sizes[:-1]:
+            ax.axhline(y, c="w")
+
+        for i, _ in enumerate(components):
+            ax.text(-1, cum_sizes[i] - sizes[i] / 2, names[i],
+                    rotation=90, ha="right", va="center", size=10)
+
+        ax.set(yticks=[], xlabel="TR")
 
     def _subsample(self, data, n, rs):
 
         return rs.permutation(data)[:n]
+
+    def add_colorbar(self, f):
+
+        ax = f.add_axes([.035, .35, .0125, .2])
+        xx = np.linspace(1, 0, 100)[:, np.newaxis]
+        ax.imshow(xx, aspect="auto", cmap="gray")
+        ax.set(xticks=[], yticks=[], ylabel="Percent signal change")
+        ax.text(0, -2, "+2", ha="center", va="bottom", clip_on=False)
+        ax.text(0, 103, "-2", ha="center", va="top", clip_on=False)
