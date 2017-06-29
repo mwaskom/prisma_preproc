@@ -1,47 +1,47 @@
-
+import time
 import numpy as np
 from scipy.signal import detrend
 from scipy.ndimage import gaussian_filter
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import nibabel as nib
 
 
 class PowerPlot(object):
 
-    def __init__(self, data, wmparc, realign_params=None,
-                 smooth_sigma=3, random_seed=0):
+    def __init__(self, data, wmparc, realign_params=None, smooth_sigma=3):
 
         if isinstance(data, str):
             img = nib.load(data)
         else:
             img = data
-        self.orig_data = data = img.get_data().astype(np.float).copy()
+        data = img.get_data().astype(np.float)
 
         if isinstance(wmparc, str):
             wmparc = nib.load(wmparc).get_data()
         else:
             wmparc = wmparc.get_data()
 
-        sx, sy, sz, tr = img.header.get_zooms()
-        self.voxel_sizes = sx, sy, sz
-        self.tr = tr
-        self.ntp = data.shape[-1]
+        sx, sy, sz, _ = img.header.get_zooms()
+        voxel_sizes = sx, sy, sz
+        if smooth_sigma is not None:
+            if smooth_sigma > 0:
+                smooth_sigma = np.divide(smooth_sigma, voxel_sizes)
+            else:
+                smooth_sigma = None
 
-        data = self.percent_change(data)
-        self.data = data = detrend(data)
-        self.components = components = self.define_components(wmparc)
-        self.data = data = self.smooth_data(data, components, smooth_sigma)
-        self.segdata = segdata = self.segment_data(data, components)
-        self.fd = fd = self.framewise_displacement(realign_params)
+        components, brain = self.define_components(wmparc)
+        data[brain] = self.percent_change(data[brain])
+        data[brain] = detrend(data[brain])
+        data = self.smooth_data(data, components, smooth_sigma)
+        segdata = self.segment_data(data, components)
+        fd = self.framewise_displacement(realign_params)
 
         f, axes = self.setup_figure()
         self.f, self.axes = f, axes
 
-        self.plot_fd(axes[0], fd)
-        self.plot_data(axes[1], segdata)
-        f.tight_layout(h_pad=0, w_pad=0)
-
-        self.add_colorbar(f)
+        self.plot_fd(axes["motion"], fd)
+        self.plot_data(axes, segdata)
 
     def percent_change(self, data):
 
@@ -66,17 +66,16 @@ class PowerPlot(object):
             deepwm=(wmparc == 5001) | (wmparc == 5002),
             csf=np.in1d(wmparc.flat, csf_ids).reshape(wmparc.shape),
             )
-        return components
+        brain = np.any(components.values(), axis=0)
+        return components, brain
 
     def smooth_data(self, data, components, sigma):
 
-        if sigma is None or sigma == 0:
+        if sigma is None:
             return data
-        else:
-            sigmas = np.divide(sigma, self.voxel_sizes)
 
         for comp, mask in components.items():
-            data[mask] = self._smooth_within_mask(data, mask, sigmas)
+            data[mask] = self._smooth_within_mask(data, mask, sigma)
 
         return data
 
@@ -113,8 +112,26 @@ class PowerPlot(object):
     def setup_figure(self):
 
         width, height = 8, 10
-        f, axes = plt.subplots(2, figsize=(width, height), sharex=True,
-                               gridspec_kw=dict(height_ratios=(.1, .9)))
+        f = plt.figure(figsize=(width, height))
+
+        gs = plt.GridSpec(nrows=2, ncols=2,
+                          left=.07, right=.98,
+                          bottom=.05, top=.96,
+                          wspace=0, hspace=.02,
+                          height_ratios=[.1, .9],
+                          width_ratios=[.01, .99])
+
+        ax_i = f.add_subplot(gs[1, 1])
+        ax_m = f.add_subplot(gs[0, 1], sharex=ax_i)
+        ax_c = f.add_subplot(gs[1, 0], sharey=ax_i)
+
+        ax_i.set(xlabel="Volume", yticks=[])
+        ax_m.set_ylabel("FD (mm)")
+        ax_c.set(xticks=[])
+
+        ax_b = f.add_axes([.035, .35, .0125, .2])
+
+        axes = dict(image=ax_i, motion=ax_m, components=ax_c, cbar=ax_b)
 
         return f, axes
 
@@ -123,47 +140,34 @@ class PowerPlot(object):
         if fd is None:
             pass
 
+        ax.set(ylim=(0, .5))
         ax.plot(np.arange(1, len(fd) + 1), fd)
         ax.set(ylabel="FD (mm)")
-        if fd.max() < .2:
-            ax.set(ylim=(0, .2))
-        else:
-            ax.set(ylim=(0, None))
+        ax.set(ylim=(0, None))
 
-    def plot_data(self, ax, segdata):
+    def plot_data(self, axes, segdata):
 
-        rs = np.random.RandomState(0)
-
-        sizes = [800, 200, 200, 500, 200, 100]
         components = ["cortex", "subgm", "cerbel", "supwm", "deepwm", "csf"]
-        names = ["Cortex", "Subcort.", "Cerebel.", "Sup. WM", "Deep WM", "CSF"]
+        plot_data = np.vstack([segdata[comp] for comp in components])
 
-        plot_data = np.vstack([
-            self._subsample(segdata[comp], size, rs)
-            for comp, size in zip(components, sizes)
-        ])
+        axes["image"].imshow(plot_data, cmap="gray", vmin=-2, vmax=2,
+                             aspect="auto", rasterized=True)
 
-        ax.imshow(plot_data, aspect="auto", cmap="gray", vmin=-2, vmax=2)
-
+        sizes = [len(segdata[comp]) for comp in components]
         cum_sizes = np.cumsum(sizes)
 
         for y in cum_sizes[:-1]:
-            ax.axhline(y, c="w")
+            axes["image"].axhline(y, c="w", lw=1)
 
-        for i, _ in enumerate(components):
-            ax.text(-1, cum_sizes[i] - sizes[i] / 2, names[i],
-                    rotation=90, ha="right", va="center", size=10)
+        comp_ids = np.vstack([
+            np.full((len(segdata[comp]), 1), i, dtype=np.int)
+            for i, comp in enumerate(components)
+        ])
+        axes["components"].imshow(comp_ids, aspect="auto", cmap="viridis",
+                                  rasterized=True)
 
-        ax.set(yticks=[], xlabel="TR")
-
-    def _subsample(self, data, n, rs):
-
-        return rs.permutation(data)[:n]
-
-    def add_colorbar(self, f):
-
-        ax = f.add_axes([.035, .35, .0125, .2])
         xx = np.linspace(1, 0, 100)[:, np.newaxis]
+        ax = axes["cbar"]
         ax.imshow(xx, aspect="auto", cmap="gray")
         ax.set(xticks=[], yticks=[], ylabel="Percent signal change")
         ax.text(0, -2, "+2", ha="center", va="bottom", clip_on=False)
