@@ -19,7 +19,7 @@ import nibabel as nib
 class PowerPlot(object):
 
     def __init__(self, data, wmparc, realign_params=None, smooth_sigma=3,
-                 vlim=2, title=None):
+                 vlim=None, title=None):
         """Heatmap rendering of an fMRI timeseries for quality control.
 
         The Freesurfer segmentation is used to organize data by different
@@ -46,12 +46,12 @@ class PowerPlot(object):
             This means three columns of rotations in radians and then three
             columns of translations in mm. If present, the time series of
             framewise displacements will be shown at the top of the figure.
-        smooth_sigma : float,
+        smooth_sigma : float or None, optional
             Size of the smoothing kernel, in mm, to apply. Smoothing is
             restricted within the mask for each component (cortex, cerebellum,
             etc.). Smoothing reduces white noise and makes global image
-            artifacts much more apparent.
-        vlim : int
+            artifacts much more apparent. Set to None to skip smoothing.
+        vlim : None or int, optional
             Colormap limits (will be symmetric) in percent signal change units.
         title : string
             Title to show at the top of the plot.
@@ -60,6 +60,8 @@ class PowerPlot(object):
         ----------
         fig : matplotlib Figure
         axes : dict of matplotlib Axes
+        segdata : dict of arrays with data in the main plot
+        fd : 1d array of framewise displacements
 
         """
         # Load the timeseries data
@@ -92,6 +94,11 @@ class PowerPlot(object):
         segdata = self.segment_data(data, masks)
         fd = self.framewise_displacement(realign_params)
 
+        # Get a default limit for the colormap
+        if vlim is None:
+            sd = np.percentile(segdata["cortex"].std(axis=1), 95)
+            vlim = int(np.round(sd))
+
         # Make the plot
         fig, axes = self.setup_figure()
         self.fig, self.axes = fig, axes
@@ -99,6 +106,10 @@ class PowerPlot(object):
         self.plot_data(axes, segdata, vlim)
         if title is not None:
             fig.suptitle(title)
+
+        # Store useful attributes
+        self.segdata = segdata
+        self.fd = fd
 
     def percent_change(self, data):
         """Convert to percent signal change over the mean for each voxel."""
@@ -184,12 +195,11 @@ class PowerPlot(object):
         ax_i = f.add_subplot(gs[1, 1])
         ax_m = f.add_subplot(gs[0, 1], sharex=ax_i)
         ax_c = f.add_subplot(gs[1, 0], sharey=ax_i)
+        ax_b = f.add_axes([.035, .35, .0125, .2])
 
         ax_i.set(xlabel="Volume", yticks=[])
         ax_m.set(ylabel="FD (mm)")
         ax_c.set(xticks=[])
-
-        ax_b = f.add_axes([.035, .35, .0125, .2])
 
         axes = dict(image=ax_i, motion=ax_m, comp=ax_c, cbar=ax_b)
 
@@ -208,18 +218,19 @@ class PowerPlot(object):
 
     def plot_data(self, axes, segdata, vlim):
         """Draw the elements corresponding to the image data."""
+
+        # Concatenate and plot the time series data
         components = ["cortex", "subgm", "cerbel", "supwm", "deepwm", "csf"]
         plot_data = np.vstack([segdata[comp] for comp in components])
-
         axes["image"].imshow(plot_data, cmap="gray", vmin=-vlim, vmax=vlim,
                              aspect="auto", rasterized=True)
 
+        # Separate the anatomical components
         sizes = [len(segdata[comp]) for comp in components]
-        cum_sizes = np.cumsum(sizes)
-
-        for y in cum_sizes[:-1]:
+        for y in np.cumsum(sizes)[:-1]:
             axes["image"].axhline(y, c="w", lw=1)
 
+        # Add colors to identify the anatomical components
         comp_ids = np.vstack([
             np.full((len(segdata[comp]), 1), i, dtype=np.int)
             for i, comp in enumerate(components)
@@ -232,6 +243,7 @@ class PowerPlot(object):
                             aspect="auto", rasterized=True,
                             cmap=comp_cmap)
 
+        # Add the colorbar
         xx = np.expand_dims(np.linspace(1, 0, 100), -1)
         ax = axes["cbar"]
         ax.imshow(xx, aspect="auto", cmap="gray")
