@@ -1,4 +1,3 @@
-import time
 import numpy as np
 from scipy.signal import detrend
 from scipy.ndimage import gaussian_filter
@@ -126,12 +125,12 @@ class PowerPlot(object):
         ax_c = f.add_subplot(gs[1, 0], sharey=ax_i)
 
         ax_i.set(xlabel="Volume", yticks=[])
-        ax_m.set_ylabel("FD (mm)")
+        ax_m.set(ylabel="FD (mm)", xticklabels=[])
         ax_c.set(xticks=[])
 
         ax_b = f.add_axes([.035, .35, .0125, .2])
 
-        axes = dict(image=ax_i, motion=ax_m, components=ax_c, cbar=ax_b)
+        axes = dict(image=ax_i, motion=ax_m, comp=ax_c, cbar=ax_b)
 
         return f, axes
 
@@ -141,7 +140,7 @@ class PowerPlot(object):
             pass
 
         ax.set(ylim=(0, .5))
-        ax.plot(np.arange(1, len(fd) + 1), fd)
+        ax.plot(np.arange(1, len(fd) + 1), fd, lw=1.5, color=".15")
         ax.set(ylabel="FD (mm)")
         ax.set(ylim=(0, None))
 
@@ -163,10 +162,15 @@ class PowerPlot(object):
             np.full((len(segdata[comp]), 1), i, dtype=np.int)
             for i, comp in enumerate(components)
         ])
-        axes["components"].imshow(comp_ids, aspect="auto", cmap="viridis",
-                                  rasterized=True)
+        comp_colors = [u'#5a86ad', u'#3b638c', u'#00035b',
+                       u'#b9484e', u'#8c000f', u'#fbdd7e']
+        comp_cmap = mpl.colors.ListedColormap(comp_colors)
+        axes["comp"].imshow(comp_ids,
+                            vmin=0, vmax=len(components) - 1,
+                            aspect="auto", rasterized=True,
+                            cmap=comp_cmap)
 
-        xx = np.linspace(1, 0, 100)[:, np.newaxis]
+        xx = np.expand_dims(np.linspace(1, 0, 100), -1)
         ax = axes["cbar"]
         ax.imshow(xx, aspect="auto", cmap="gray")
         ax.set(xticks=[], yticks=[], ylabel="Percent signal change")
