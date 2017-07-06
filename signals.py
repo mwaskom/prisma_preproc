@@ -4,6 +4,49 @@ from scipy.ndimage import gaussian_filter
 import nibabel as nib
 
 
+def compute_cov(data, detrend=True, mask=None):
+    """Compute the temporal coefficient of variation.
+
+    Parameters
+    ----------
+    data : numpy array
+        Timeseries data with time in the final axis.
+    detrend : bool
+        If True, linearly detrend the data before computing coefficient of
+        variation.
+
+    Returns
+    -------
+    cov : numpy array
+        Array with the coeficient of variation
+
+    """
+    if mask is not None:
+        data = data[mask]
+
+    mean = data.mean(axis=-1)
+    if detrend:
+        std = signal.detrend(data).std(axis=-1)
+    else:
+        std = data.std(axis=-1)
+
+    # Compute temporal coefficient of variation
+    cov = std / mean
+    cov[mean == 0] = 0
+
+    if mask is not None:
+        out_cov = np.zeros_like(mask, np.float)
+        out_cov[mask] = cov
+        cov = out_cov
+
+    return cov
+
+
+def percent_change(data):
+    """Convert data to percent signal change over final axis."""
+    return (data / data.mean(axis=-1, keepdims=True) - 1) * 100
+
+
 def identify_noisy_voxels(ts, ribbon, neighborhood=5, threshold=1.5,
                           detrend=True):
     """Create a mask of voxels that are unusually noisy given neighbors.
@@ -38,15 +81,7 @@ def identify_noisy_voxels(ts, ribbon, neighborhood=5, threshold=1.5,
     with np.errstate(all="ignore"):
 
         # Compute temporal mean and standard deviation
-        mean = data.mean(axis=-1)
-        if detrend:
-            std = signal.detrend(data).std(axis=-1)
-        else:
-            std = data.std(axis=-1)
-
-        # Compute temporal coefficient of variation
-        cov = std / mean
-        cov[mean == 0] = 0
+        cov = compute_cov(data, detrend, mask)
 
         # Smooth the cov within the cortex mask
         smooth_norm = gaussian_filter(mask.astype(np.float), sigma)
@@ -89,6 +124,7 @@ def smoothing_matrix(surface, vertids, noisy_voxels=None, fwhm=2):
 
     """
     # Define the weighting function
+    assert fwhm > 0
     sigma = fwhm / 2.355
     norm = stats.norm(0, sigma)
 
