@@ -172,7 +172,7 @@ def smoothing_matrix(surface, vertids, noisy_voxels=None, fwhm=2):
 
 
 def smooth_cortex(surface, ts, vertvol, noisy_voxels=None, fwhm=2):
-    """Smooth voxels correspodning to cortex using surface-based distances.
+    """Smooth voxels corresponding to cortex using surface-based distances.
 
     Parameters
     ----------
@@ -181,17 +181,19 @@ def smooth_cortex(surface, ts, vertvol, noisy_voxels=None, fwhm=2):
         `.dijkstra_distance()`.
     ts : nibabel image
         4D timeseries data.
-    vertcol : nibabel image
+    vertvol : nibabel image
         Image where voxels have their corresponding vertex ID or are -1 if not
         part of cortex.
     noisy_voxels : nibabel image
         Binary image defining voxels that should be excluded and interpolated
         during smoothing.
+    fwhm : float
+        Size of smoothing kernel in mm.
 
     Returns
     -------
     smooth_ts : nibabel image
-        Image like `ts` but with after smoothing.
+        Image like `ts` but after smoothing.
 
     """
     # Load the data
@@ -214,3 +216,44 @@ def smooth_cortex(surface, ts, vertvol, noisy_voxels=None, fwhm=2):
     data[ribbon] = S * cortex_data
 
     return nib.Nifti1Image(data, ts.affine, ts.header)
+
+
+def smooth_volume(ts, fwhm, mask=None, mask_output=True):
+    """Filter in volume space with an isotropic gaussian kernel.
+
+    Parameters
+    ----------
+    ts : nibabel image
+        4D timeseries data.
+    fwhm : float
+        Size of smoothing kernel in mm.
+    mask : nibabel image
+        3D binary image defining smoothing range.
+    mask_output : bool
+        If True, apply the smoothing mask to the output.
+
+    Returns
+    -------
+    smooth_ts : nibabel image
+        Image like `ts` but after smoothing.
+
+    """
+    data = ts.get_data().copy()  # TODO allow inplace as an option
+    if np.ndim(data) == 3:
+        data = np.expanddims(data, 3)
+
+    sigma = np.divide(fwhm / 2.355, ts.header.get_zooms()[:3])
+
+    if mask is None:
+        mask = norm = 1
+    else:
+        mask = mask.get_data()
+        norm = gaussian_filter(mask, sigma)
+
+    for f in range(data.shape[-1]):
+        data_frame = gaussian_filter(data[..., f] * mask, sigma) / norm
+        if mask_output:
+            data_frame *= mask
+        data[..., f] = data_frame
+
+    return nib.Nifti1Image(data.squeeze(), ts.affine, ts.header)
