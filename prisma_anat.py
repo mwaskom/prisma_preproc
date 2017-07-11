@@ -1,6 +1,7 @@
+from __future__ import division
 import os
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, binary_erosion, convolve, label
 import nibabel as nib
 from nipype import (Workflow, Node, MapNode,
                     IdentityInterface, SelectFiles, DataSink)
@@ -68,8 +69,6 @@ warp_mask = Node(fsl.ApplyWarp(in_file=mni_mask, interp="nn"),
 
 fill_mask = Node(fsl.ImageMaths(op_string="-fillh"), "fill_mask")
 
-dilate_mask = Node(fsl.DilateImage(operation="max"), "dilate_mask")
-
 # --- Register the T2w to the T1w volume
 
 parallelization = dict(OMP_NUM_THREADS="32")
@@ -82,6 +81,7 @@ register_between = Node(fs.RobustRegister(registered_file=True,
                                           ),
                         "register_between")
 
+# TODO add fast/less accurate FLIRT based registration as an option
 # register_between = Node(fsl.FLIRT(dof=6, interp="spline"),
 #                         "register_between")
 
@@ -100,8 +100,10 @@ class BiasCorrectOutput(TraitedSpec):
 
     t1w_file = File(exists=True)
     t2w_file = File(exists=True)
+    t1w_brain_file = File(exists=True)
+    t2w_brain_file = File(exists=True)
     bias_file = File(exists=True)
-    smoothed_bias_file = File(exists=True)
+    bias_orig_file = File(exists=True)
 
 
 class BiasCorrect(BaseInterface):
@@ -114,60 +116,87 @@ class BiasCorrect(BaseInterface):
 
     def _run_interface(self, runtime):
 
-        self._results = dict()
-
         old_settings = np.seterr(all="ignore")
+
+        self._results = dict()
 
         # Load the input data
         t1w_img = nib.load(self.inputs.t1w_file)
         t2w_img = nib.load(self.inputs.t2w_file)
         t1w_data, t2w_data = t1w_img.get_data(), t2w_img.get_data()
-        mask = nib.load(self.inputs.mask_file).get_data()
+        brain_mask = nib.load(self.inputs.mask_file).get_data()
 
-        # Compute and save the bias field
-        bias_data = np.sqrt(np.abs(t1w_data * t2w_data))
-        bias_data *= mask
-        bias_data /= bias_data[mask.astype(bool)].mean()
+        # Compute, normalize, and save the bias field
+        bias_data = np.sqrt(np.abs(t1w_data * t2w_data)) * brain_mask
+        mean_bias = bias_data[brain_mask.astype(bool)].mean()
+        bias_data = (bias_data / mean_bias)
+        self.save_output(bias_data, t1w_img,
+                         "bias_orig_file", "bias_field_orig.nii.gz")
 
-        bias_img = nib.Nifti1Image(bias_data, t1w_img.affine, t1w_img.header)
-        bias_file = os.path.abspath("bias_field.nii.gz")
-        self._results["bias_file"] = bias_file
-        nib.save(bias_img, bias_file)
+        # Define smoothing sigma in voxel units
+        voxel_res = t1w_img.header.get_zooms()
+        voxel_sigma = np.divide(self.inputs.smooth_sigma, voxel_res)
 
-        # Define smoothing sigma in voxel units (note assumes isotropic)
-        voxel_res = t1w_img.header.get_zooms()[0]
-        voxel_sigma = self.inputs.smooth_sigma / voxel_res
-
-        # Smooth the bias field within the brain mask
+        # Do an initial rough smoothing within in the brain
         smoothed_bias = gaussian_filter(bias_data, voxel_sigma)
-        smoothed_mask = gaussian_filter(mask.astype(np.float), voxel_sigma)
+        smoothed_mask = gaussian_filter(brain_mask, voxel_sigma)
         smoothed_bias /= smoothed_mask
-        smoothed_bias = np.nan_to_num(smoothed_bias) * mask
+        smoothed_bias[brain_mask == 0] = 0
 
-        # Save out the smoothed bias field
-        smoothed_bias_file = os.path.abspath("bias_field_smoothed.nii.gz")
-        self._results["smoothed_bias_file"] = smoothed_bias_file
-        nib.save(nib.Nifti1Image(smoothed_bias,
-                                 t1w_img.affine, t1w_img.header),
-                 smoothed_bias_file)
+        # Generate a tighter mask of only brain tissue
+        signal_map = bias_data / smoothed_bias
+        signal_mean = signal_map[brain_mask.astype(bool)].mean()
+        signal_std = signal_map[brain_mask.astype(bool)].std()
+        signal_thresh = signal_mean - (.5 * signal_std)
+        high_signal = binary_erosion(signal_map > signal_thresh)
+        mask_components, _ = label(high_signal)
+        labels = mask_components[mask_components > 0]
+        biggest_object = np.argmax(np.bincount(labels))
+        tight_mask = mask_components == biggest_object
+
+        # Dilate the bias field estimate to cover full FOV
+        weights = np.full((3, 3, 3), 1 / 27)
+        bias_data_dil = (bias_data * tight_mask).copy()
+        iter_mask = bias_data_dil > 0
+        while not iter_mask.all():
+            filt = convolve(bias_data_dil, weights)
+            norm = convolve(iter_mask.astype(np.float), weights)
+            next_dil = filt / norm
+            next_dil[norm == 0] = 0
+            bias_data_dil[~tight_mask] = next_dil[~tight_mask]
+            iter_mask = bias_data_dil > 0
+
+        # Smooth the full-fov bias estimate
+        bias_data_dil = gaussian_filter(bias_data_dil, voxel_sigma)
+
+        # Save the final bias field image
+        self.save_output(bias_data_dil, t1w_img,
+                         "bias_file", "bias_field.nii.gz")
 
         # Bias-correct and save the T1w image
-        t1w_corrected = np.nan_to_num(t1w_data / smoothed_bias) * mask
-        t1w_file = os.path.abspath("T1w.nii.gz")
-        self._results["t1w_file"] = t1w_file
-        nib.save(nib.Nifti1Image(t1w_corrected,
-                                 t1w_img.affine, t1w_img.header), t1w_file)
+        t1w_corrected = t1w_data / bias_data_dil
+        self.save_output(t1w_corrected, t1w_img, "t1w_file", "T1w.nii.gz")
+        t1w_corrected_brain = t1w_corrected * brain_mask
+        self.save_output(t1w_corrected_brain, t1w_img,
+                         "t1w_brain_file", "T1w_brain.nii.gz")
 
         # Bias-correct and save the T1w image
-        t2w_corrected = np.nan_to_num(t2w_data / smoothed_bias) * mask
-        t2w_file = os.path.abspath("T2w.nii.gz")
-        self._results["t2w_file"] = t2w_file
-        nib.save(nib.Nifti1Image(t2w_corrected,
-                                 t2w_img.affine, t2w_img.header), t2w_file)
+        t2w_corrected = t2w_data / bias_data_dil
+        self.save_output(t2w_corrected, t2w_img, "t2w_file", "T2w.nii.gz")
+        t2w_corrected_brain = t2w_corrected * brain_mask
+        self.save_output(t2w_corrected_brain, t2w_img,
+                         "t2w_brain_file", "T2w_brain.nii.gz")
 
         np.seterr(**old_settings)
 
         return runtime
+
+    def save_output(self, data, template, field, fname):
+
+        full_fname = os.path.abspath(fname)
+        self._results[field] = full_fname
+        img = nib.Nifti1Image(data, template.affine, template.header)
+        nib.save(img, full_fname)
 
 
 correct_bias = Node(BiasCorrect(), "correct_bias")
@@ -203,14 +232,10 @@ workflow.connect([
         [("inverse_warp", "field_file")]),
     (warp_mask, fill_mask,
         [("out_file", "in_file")]),
-    #(fill_mask, dilate_mask,
-    #    [("out_file", "in_file")]),
     #(register_t1w, register_between,
     #    [("out_file", "reference")]),
     #(register_t2w, register_between,
     #    [("out_file", "in_file")]),
-    #(dilate_mask, register_between,
-    #    [("out_file", "ref_weight")]),
     (register_t1w, register_between,
         [("out_file", "target_file")]),
     (register_t2w, register_between,
@@ -219,6 +244,8 @@ workflow.connect([
         [("out_file", "t1w_file")]),
     (register_between, correct_bias,
         [("registered_file", "t2w_file")]),
+    #(register_between, correct_bias,
+    #    [("out_file", "t2w_file")]),
     (fill_mask, correct_bias,
         [("out_file", "mask_file")]),
 ])
