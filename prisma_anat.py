@@ -126,7 +126,7 @@ class BiasCorrect(BaseInterface):
         t1w_data, t2w_data = t1w_img.get_data(), t2w_img.get_data()
         brain_mask = nib.load(self.inputs.mask_file).get_data()
 
-        # Compute, normalize, and save the bias field
+        # Compute, normalize, and save the original bias field
         bias_data = np.sqrt(np.abs(t1w_data * t2w_data)) * brain_mask
         mean_bias = bias_data[brain_mask.astype(bool)].mean()
         bias_data = (bias_data / mean_bias)
@@ -137,34 +137,11 @@ class BiasCorrect(BaseInterface):
         voxel_res = t1w_img.header.get_zooms()
         voxel_sigma = np.divide(self.inputs.smooth_sigma, voxel_res)
 
-        # Do an initial rough smoothing within in the brain
-        smoothed_bias = gaussian_filter(bias_data, voxel_sigma)
-        smoothed_mask = gaussian_filter(brain_mask, voxel_sigma)
-        smoothed_bias /= smoothed_mask
-        smoothed_bias[brain_mask == 0] = 0
-
-        # Generate a tighter mask of only brain tissue
-        signal_map = bias_data / smoothed_bias
-        signal_mean = signal_map[brain_mask.astype(bool)].mean()
-        signal_std = signal_map[brain_mask.astype(bool)].std()
-        signal_thresh = signal_mean - (.5 * signal_std)
-        high_signal = binary_erosion(signal_map > signal_thresh)
-        mask_components, _ = label(high_signal)
-        labels = mask_components[mask_components > 0]
-        biggest_object = np.argmax(np.bincount(labels))
-        tight_mask = mask_components == biggest_object
+        # Define a conservative mask of brain tissue to estimate bias in
+        tight_mask = self.find_tight_mask(bias_data, brain_mask, voxel_sigma)
 
         # Dilate the bias field estimate to cover full FOV
-        weights = np.full((3, 3, 3), 1 / 27)
-        bias_data_dil = (bias_data * tight_mask).copy()
-        iter_mask = bias_data_dil > 0
-        while not iter_mask.all():
-            filt = convolve(bias_data_dil, weights)
-            norm = convolve(iter_mask.astype(np.float), weights)
-            next_dil = filt / norm
-            next_dil[norm == 0] = 0
-            bias_data_dil[~tight_mask] = next_dil[~tight_mask]
-            iter_mask = bias_data_dil > 0
+        bias_data_dil = self.dilate_from_mask(bias_data, tight_mask)
 
         # Smooth the full-fov bias estimate
         bias_data_dil = gaussian_filter(bias_data_dil, voxel_sigma)
@@ -173,16 +150,18 @@ class BiasCorrect(BaseInterface):
         self.save_output(bias_data_dil, t1w_img,
                          "bias_file", "bias_field.nii.gz")
 
-        # Bias-correct and save the T1w image
+        # Bias-correct and save the T1w head and brain images
         t1w_corrected = t1w_data / bias_data_dil
         self.save_output(t1w_corrected, t1w_img, "t1w_file", "T1w.nii.gz")
+
         t1w_corrected_brain = t1w_corrected * brain_mask
         self.save_output(t1w_corrected_brain, t1w_img,
                          "t1w_brain_file", "T1w_brain.nii.gz")
 
-        # Bias-correct and save the T1w image
+        # Bias-correct and save the T2w head and brain images
         t2w_corrected = t2w_data / bias_data_dil
         self.save_output(t2w_corrected, t2w_img, "t2w_file", "T2w.nii.gz")
+
         t2w_corrected_brain = t2w_corrected * brain_mask
         self.save_output(t2w_corrected_brain, t2w_img,
                          "t2w_brain_file", "T2w_brain.nii.gz")
@@ -190,6 +169,43 @@ class BiasCorrect(BaseInterface):
         np.seterr(**old_settings)
 
         return runtime
+
+    def find_tight_mask(self, data, mask, voxel_sigma):
+
+        # Do an initial rough smoothing within in the brain
+        smoothed_bias = gaussian_filter(data, voxel_sigma)
+        smoothed_mask = gaussian_filter(mask, voxel_sigma)
+        smoothed_bias /= smoothed_mask
+        smoothed_bias[mask == 0] = 0
+
+        # Generate a tighter mask of only brain tissue
+        signal_map = data / smoothed_bias
+        signal_mean = signal_map[mask.astype(bool)].mean()
+        signal_std = signal_map[mask.astype(bool)].std()
+        signal_thresh = signal_mean - (.5 * signal_std)
+        high_signal = binary_erosion(signal_map > signal_thresh)
+        mask_components, _ = label(high_signal)
+        labels = mask_components[mask_components > 0]
+        biggest_object = np.argmax(np.bincount(labels))
+        tight_mask = mask_components == biggest_object
+
+        return tight_mask
+
+    def dilate_from_mask(data, mask):
+
+        weights = np.full((3, 3, 3), 1 / 27)
+        data_dil = data * mask
+        iter_mask = data_dil > 0
+
+        while not iter_mask.all():
+            filt = convolve(data_dil, weights)
+            norm = convolve(iter_mask.astype(np.float), weights)
+            next_dil = filt / norm
+            next_dil[norm == 0] = 0
+            data_dil[~mask] = next_dil[~mask]
+            iter_mask = data_dil > 0
+
+        return data_dil
 
     def save_output(self, data, template, field, fname):
 
